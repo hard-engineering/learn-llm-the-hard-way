@@ -1,171 +1,173 @@
 ---
-title: "2. The Same Model, Learned the Hard Way"
-description: Softmax, cross-entropy, and a gradient derived on paper — the bigram model retrained by gradient descent
+title: "2. The same model, by gradient descent"
+description: Softmax, cross-entropy, and a gradient derived on paper
 ---
 
-> Companion notebook: [chapter-2.ipynb](https://github.com/hard-engineering/learn-llm-the-hard-way/blob/main/notebooks/chapter-2.ipynb) ·
-> Theory reference: SLP3 Chapter 4 (Logistic Regression)
+> Companion notebook: [chapter-2.ipynb](https://github.com/hard-engineering/learn-llm-the-hard-way/blob/main/notebooks/chapter-2.ipynb).
+> Theory reference: SLP3 Chapter 4 (Logistic Regression).
 
-## Why counting has to die
+## Why counting does not scale
 
 Chapter 1's model is a table with one row per possible context. That works
-because a one-character context has only 27 possibilities. Two characters:
-$27^2 = 729$ rows. Ten characters: $27^{10} \approx 200$ trillion rows,
-nearly all with zero examples. GPT conditions on thousands of tokens. **You
-cannot count your way there** — and whatever replaces the table needs a
-different procedure for setting its values, because "count and normalise"
-only works for tables.
+because a one-character context has only 27 possibilities. Two characters
+need $27^2 = 729$ rows. Ten characters need $27^{10}$ rows, about 200
+trillion, nearly all with zero examples. GPT conditions on thousands of
+tokens. No table can hold that, and no dataset can fill it. The replacement
+for the table needs a different procedure for setting its values, because
+"count and normalise" only works for tables.
 
-That procedure is this chapter. To learn it honestly, we pick the one case
-where the old and new roads can be compared: the bigram model itself. Rebuild
-the exact 729-number model, set its values by the new procedure, and check it
-converges to the same answer.
+That procedure is this chapter. To learn it, we pick the one case where the
+old and new roads can be compared: the bigram model itself. We rebuild the
+exact 729-number model, set its values by the new procedure, and check that
+it converges to the same answer counting gave.
 
-The new procedure, in one paragraph: start with 729 **random** numbers.
-Define a single number measuring how bad they are as a model — chapter 1's
-NLL, now viewed as a function of the parameters. For each parameter, work out
-whether increasing it slightly would raise or lower the loss (a derivative;
-all 729 of them together, the gradient), and nudge each parameter a small
-step downhill. Repeat. This is **gradient descent**, and it never enumerates
-contexts — it works for any arrangement of numbers whose loss is
-differentiable, which is why the same procedure trains trillion-parameter
-models.
+The new procedure, in one paragraph. Start with 729 random numbers. Define a
+single number that measures how bad they are as a model: chapter 1's NLL,
+now viewed as a function of the parameters. For each parameter, work out
+whether a small increase would raise or lower the loss. That is a
+derivative. All 729 of them together form the gradient. Nudge each parameter
+a small step downhill and repeat. This is gradient descent. It never
+enumerates contexts. It works for any arrangement of numbers whose loss is
+differentiable, and that is why the same procedure trains models with
+trillions of parameters.
 
 ## The model, rebuilt
 
-The 729 numbers live in a 27×27 matrix $W$ — same shape as chapter 1's
-table, but initialised randomly, and its entries are arbitrary reals
-("weights"), not probabilities. Rows still mean current character; columns
-still mean next character.
+The 729 numbers live in a 27x27 matrix $W$, the same shape as chapter 1's
+table. Two differences: it starts random, and its entries are arbitrary real
+numbers ("weights"), not probabilities. Rows still mean current character.
+Columns still mean next character.
 
-**Lookup becomes arithmetic.** Encode the input character as a one-hot vector
-$x$ (27 zeros, a single 1). Then $z = xW$ selects a row of $W$ — verify on
-paper with a 3×3 example that one-hot × matrix = row selection. The 27
-numbers in $z$ are called **logits**: raw scores, unnormalised, possibly
+Lookup becomes arithmetic. Encode the input character as a one-hot vector
+$x$: 27 zeros with a single 1. Then $z = xW$ selects a row of $W$. Verify on
+paper with a 3x3 example that one-hot times matrix equals row selection. The
+27 numbers in $z$ are called logits: raw scores, unnormalised, possibly
 negative.
 
-**Scores become probabilities** via softmax — exponentiate (all positive),
-then normalise (sums to 1):
+Softmax converts scores to probabilities. Exponentiate, so everything is
+positive. Then normalise, so the row sums to 1:
 
 $$p_k = \frac{e^{z_k}}{\sum_{j=1}^{27} e^{z_j}}$$
 
-Chapter 1 normalised positive counts by their row sum; softmax is the same
-move applied to exponentiated scores, so it works on any real numbers. A side
-effect worth noticing: softmax outputs are strictly positive — the $\log 0$
-disease of chapter 1 is structurally impossible here.
+Chapter 1 normalised positive counts by their row sum. Softmax is the same
+move, applied to exponentiated scores, so it works on any real numbers. One
+side effect: softmax outputs are strictly positive, so the $\log 0$ problem
+of chapter 1 cannot occur here.
 
-**The loss** is chapter 1's NLL, now with $p$ coming from $W$ instead of from
-counts. For one example with correct next character $y$: $L = -\log p_y$.
-Averaged over all ~228k bigrams, that is the function gradient descent will
-descend. Random $W$ scores about 3.3 (uniform-guessing level); the counting
-model's 2.45 is the target.
+The loss is chapter 1's NLL, with $p$ now coming from $W$ instead of from
+counts. For one example with correct next character $y$, the loss is
+$L = -\log p_y$. Averaged over all ~228k bigrams, this is the function
+gradient descent will minimise. A random $W$ scores about 3.3, the level of
+uniform guessing. The counting model's 2.45 is the target.
 
-## The derivation — do this on paper
+## The derivation, on paper
 
-Everything hinges on one gradient: how does the loss change as each logit
-moves? Required calculus: $\frac{d}{dx}\log x = \frac{1}{x}$,
-$\frac{d}{dx}e^x = e^x$, the chain rule, and the fact that while
+Everything depends on one gradient: how does the loss change as each logit
+moves? The required calculus: the derivative of $\log x$ is $1/x$, the
+derivative of $e^x$ is $e^x$, and the chain rule. One bookkeeping fact: while
 differentiating with respect to $z_k$, every other $z_j$ is a constant.
 
-**Step 1 — simplify before differentiating.** With $S = \sum_j e^{z_j}$:
+**Step 1. Simplify before differentiating.** With $S = \sum_j e^{z_j}$:
 
 $$L = -\log\frac{e^{z_y}}{S} = -z_y + \log S$$
 
-**Step 2 — first term.** $\frac{\partial(-z_y)}{\partial z_k}$ is $-1$ if
-$k = y$ (the term *is* $-z_k$), else $0$. Compactly: $-\mathbb{1}[k{=}y]$.
+**Step 2. First term.** The derivative of $-z_y$ with respect to $z_k$ is
+$-1$ when $k = y$, else $0$. Compactly: $-\mathbb{1}[k=y]$, where
+$\mathbb{1}$ is 1 when the condition holds and 0 otherwise.
 
-**Step 3 — second term.** Chain rule, then only $e^{z_k}$ in the sum survives
-differentiation:
+**Step 3. Second term.** Apply the chain rule to $\log S$. In the sum $S$,
+only the term $e^{z_k}$ depends on $z_k$:
 
 $$\frac{\partial \log S}{\partial z_k} = \frac{1}{S} \cdot e^{z_k} = p_k$$
 
-The derivative of log-sum-exp **is** the softmax. Not a coincidence — it is
-why this pairing of functions exists.
+The derivative of log-sum-exp is the softmax. That is not a coincidence. It
+is why this pairing of functions exists.
 
-**Step 4 — combine.**
+**Step 4. Combine.**
 
-$$\frac{\partial L}{\partial z_k} = p_k - \mathbb{1}[k{=}y]
-\qquad\text{i.e.}\qquad \nabla_z L = p - \text{onehot}(y)$$
+$$\frac{\partial L}{\partial z_k} = p_k - \mathbb{1}[k=y]$$
 
-**Predictions minus truth.** For a wrong character, the gradient is $p_k$
-(positive → push that logit down, in proportion to the probability it wrongly
-claimed). For the correct character, $p_y - 1$ (negative → push up, in
-proportion to what it failed to claim). A perfect prediction gives an
-all-zero gradient: learning stops by itself.
+As a vector over all 27 logits at once: gradient = $p - \text{onehot}(y)$.
+Predictions minus truth.
+
+Read it as instructions. For a wrong character $k$, the gradient is $p_k$,
+positive, so that logit gets pushed down, in proportion to the probability it
+wrongly claimed. For the correct character, the gradient is $p_y - 1$,
+negative, so it gets pushed up, in proportion to what it failed to claim. A
+perfect prediction gives an all-zero gradient. Learning stops by itself.
 
 One hop remains. Since $z = xW$ with $x$ one-hot at position $i$, each
-$z_k$ is literally $W[i,k]$ — so the vector $p - \text{onehot}(y)$ is the
-gradient of **row $i$** of $W$, and all other rows get zero from this
-example. Chapter 1's counting touched one row per bigram, incrementing one
-cell; gradient descent touches the same row, adjusting all 27 entries.
+$z_k$ is literally $W[i,k]$. So the vector $p - \text{onehot}(y)$ is the
+gradient of row $i$ of $W$, and all other rows get zero from this example.
+Chapter 1's counting touched one row per bigram and incremented one cell.
+Gradient descent touches the same row and adjusts all 27 entries in it.
 
 ## The exercise
 
-1. Build integer arrays `xs`, `ys` (~228k input/target index pairs).
-2. `W = np.random.randn(27, 27)`.
-3. Forward: `logits = X @ W` (or `W[xs]`), softmax rows,
+1. Build integer arrays `xs`, `ys`: about 228k input/target index pairs.
+2. Initialise `W = np.random.randn(27, 27)`.
+3. Forward pass: `logits = X @ W` (or `W[xs]`), softmax the rows, then
    `loss = -np.log(probs[np.arange(n), ys]).mean()`.
-4. Backward: `dlogits = probs.copy()`, subtract 1 at target columns, divide
-   by `n`, then `dW = X.T @ dlogits`.
-5. Update `W -= 50 * dW`; loop 200 times, printing loss every few
+4. Backward pass: `dlogits = probs.copy()`, subtract 1 at the target
+   columns, divide by `n`, then `dW = X.T @ dlogits`.
+5. Update: `W -= 50 * dW`. Loop 200 times. Print the loss every few
    iterations.
 
-Success: loss starts near 3.3 and descends toward 2.45. Then softmax the
+Success: the loss starts near 3.3 and descends toward 2.45. Then softmax the
 trained $W$'s rows and run chapter 1's sampler on the result, unchanged.
 
-**Stop here and write it.**
+Stop here and write the code.
 
-## What actually happened
+## What happened in the lesson
 
 ### "Shouldn't each character's gradient be averaged over its own examples?"
 
-The instruction `dlogits /= n` — divide by the total number of examples —
-drew the sharpest question of the lesson:
+The instruction `dlogits /= n`, divide by the total number of examples, drew
+the sharpest question of the lesson:
 
 > **N:** Shouldn't the dlogits accumulate for char $i$ and then take the mean
-> over the number of training examples **of $i$**?
+> over the number of training examples of $i$?
 >
-> **Tutor:** Look at what we are taking the gradient *of*. The loss was
-> defined as the mean over all $n$ examples, and differentiation is linear:
+> **Tutor:** Look at what we are taking the gradient of. The loss was defined
+> as the mean over all $n$ examples, and differentiation is linear:
 >
 > $$\frac{\partial L}{\partial W} = \frac{1}{n}\sum_{i=1}^{n} \frac{\partial L_i}{\partial W}$$
 >
-> — the sum of per-example gradients scaled by $1/n$, no matter which row
-> each lands on. Your proposal is the gradient of a *different* loss, one
+> That is the sum of per-example gradients scaled by $1/n$, no matter which
+> row each lands on. Your proposal is the gradient of a different loss, one
 > where every context is weighted equally regardless of frequency. Our loss
-> lives in occurrence space: frequent contexts contribute more terms, so
+> lives in occurrence space. Frequent contexts contribute more terms, so
 > their rows receive proportionally larger pushes. That is not a bug to
-> normalise away — it is the model allocating learning effort by how often
-> each context actually matters. It would be strange for one `qz` sighting to
-> move the model as forcefully as ten thousand `an`s.
+> normalise away. It is the model allocating learning effort by how often
+> each context matters. It would be strange for one `qz` sighting to move
+> the model as forcefully as ten thousand `an`s.
 
-Chapter 1's occurrence-space/cell-space distinction, reappearing in
-gradients. It will not be the last time.
+Chapter 1's occurrence-space against cell-space distinction, reappearing in
+gradients.
 
-### The degeneracy worth savouring
+### The 27x27 collapse
 
 > **N:** The computation of $p$ of a row is unaffected by $n$. Can we not
-> keep it computed for $W$, which is 27×27, instead of $xW$, which is
-> $n$×27?
+> keep it computed for $W$, which is 27x27, instead of $xW$, which is
+> $n$x27?
 
-Yes — and noticing this is noticing something real. With only 27 distinct
-inputs, the $n$×27 `probs` matrix holds at most 27 distinct rows; the whole
-computation collapses into cell space, everything 27×27, cheaper by a factor
-of ~8,000. Better still, setting the collapsed gradient to zero and solving
-gives
+Yes, and noticing this is noticing something real. With only 27 distinct
+inputs, the $n$x27 `probs` matrix holds at most 27 distinct rows. The whole
+computation collapses into cell space, everything 27x27, cheaper by a factor
+of about 8,000. Better still, set the collapsed gradient to zero and solve:
 
 $$p_i = N[i,:] / c_i$$
 
-— softmax of the optimal $W$ equals **the count-normalised table of
-chapter 1**. The promised equivalence, as algebra rather than as an empirical
-convergence claim: gradient descent's destination is exactly what counting
+Softmax of the optimal $W$ equals the count-normalised table of chapter 1.
+This is the promised equivalence, as algebra rather than as an empirical
+convergence claim. Gradient descent's destination is exactly what counting
 computes directly.
 
-Why practice the $n$×27 form anyway: the collapse exists only because
-examples with identical inputs are identical computations, and that dies in
-chapter 3 — embeddings and a hidden nonlinearity make every example's
-computation distinct. From there on, "a matrix with one row per example" (a
-**batch**) is the universal shape.
+Why practice the $n$x27 form anyway: the collapse exists only because
+examples with identical inputs are identical computations. That dies in
+chapter 3. Embeddings and a hidden nonlinearity make every example's
+computation distinct. From there on, a matrix with one row per example (a
+batch) is the universal shape.
 
 ### Reading the training curve
 
@@ -179,49 +181,52 @@ The final loop (see notebook) produced:
 195 2.4630
 ```
 
-Three small stories in these numbers:
+Three observations in these numbers.
 
-- **It starts at 3.61, not 3.30.** Random Gaussian $W$ is not ignorant — it
-  has *opinions*, random ones, confidently wrong in random directions. Noise
-  costs ~0.3 nats over honest ignorance (all-zero $W$ would start at
-  $\ln 27 = 3.2958$ exactly). Foreshadows chapter 8: initialisation is chosen
-  so networks start life uniform, not opinionated.
-- **It flattens because the gradient is $p - \text{onehot}(y)$** — it shrinks
-  as predictions approach observed frequencies. Asymptotic, not stuck:
-  crawling toward counting's 2.4546 and never quite arriving.
-- **The destination is the counting table**, verifiable directly: softmax the
+- The loss starts at 3.61, not 3.30. A random Gaussian $W$ is not ignorant.
+  It has opinions, random ones, confidently wrong in random directions. The
+  noise costs about 0.3 nats over honest ignorance. An all-zero $W$ would
+  start at $\ln 27 = 3.2958$ exactly. This foreshadows chapter 8:
+  initialisation is chosen so that networks start life uniform, not
+  opinionated.
+- The curve flattens because the gradient is $p - \text{onehot}(y)$, and it
+  shrinks as predictions approach observed frequencies. The descent is
+  asymptotic, not stuck. It crawls toward counting's 2.4546 and never quite
+  arrives.
+- The destination is the counting table. Verify it directly: softmax the
   trained $W$'s rows and compare against chapter 1's $P$ matrix entry by
   entry.
 
-### Incidental lessons the notebook taught
+### Incidental lessons from the notebook
 
-- `probs[np.arange(n), ys]` — paired fancy indexing: two equal-length index
-  arrays walk in lockstep, returning element $(i, y_i)$ for every $i$. Not
-  all combinations — that would be slicing. The same idiom implements the
+- `probs[np.arange(n), ys]` is paired fancy indexing. Two equal-length index
+  arrays walk in lockstep and return element $(i, y_i)$ for every $i$. Not
+  all combinations; that would be slicing. The same idiom implements the
   one-hot subtraction: `dlogits[np.arange(n), ys] -= 1`.
-- One-hots are mostly avoidable: `W[xs]` does the forward lookup,
+- One-hots are mostly avoidable. `W[xs]` does the forward lookup, and
   fancy-indexed subtraction does the backward one. The single genuine use is
-  `X.T @ dlogits` — and even that has a scatter-add alternative,
-  `np.add.at(dW, xs, dlogits)` (not `dW[xs] += dlogits`, which silently drops
-  duplicate indices — a classic NumPy trap).
-- A `while` loop with a counter that never increments runs forever. `for i in
-  range(200)` exists; reserve `while` for stopping conditions that are
-  states, like the sampler's "until `.` is drawn".
-- The learning rate was 50 — outrageous by deep-learning standards, tolerable
-  here because dividing the loss by $n$ makes per-parameter gradients tiny
-  and this near-convex problem has no cliffs. Why the mean (not sum) in the
-  loss: it decouples gradient magnitude from dataset size, making the
-  learning rate a property of the model rather than of the data volume.
+  `X.T @ dlogits`. Even that has a scatter-add alternative,
+  `np.add.at(dW, xs, dlogits)`. Do not write `dW[xs] += dlogits`: it
+  silently drops duplicate indices, a classic NumPy trap.
+- A `while` loop with a counter that never increments runs forever. Use
+  `for i in range(200)` for counted loops. Reserve `while` for stopping
+  conditions that are states, like the sampler's "until `.` is drawn".
+- The learning rate was 50, large by deep-learning standards. It is
+  tolerable here because dividing the loss by $n$ makes per-parameter
+  gradients small, and this near-convex problem has no cliffs. Why the loss
+  is a mean and not a sum: it decouples gradient magnitude from dataset
+  size, so the learning rate is a property of the model, not of the data
+  volume.
 
 ## What carries forward
 
 - $\nabla_z L = p - \text{onehot}(y)$: the gradient that starts
-  backpropagation in every model from here to GPT (50,000 logits instead of
-  27).
-- Softmax as "normalise a row of scores"; logits as pre-probability scores.
+  backpropagation in every model from here to GPT, with 50,000 logits
+  instead of 27.
+- Softmax normalises a row of scores. Logits are pre-probability scores.
 - The batch shape: one row per example, all examples computed at once.
-- Counting and gradient descent agree where both exist; only gradient descent
-  survives what comes next.
+- Counting and gradient descent agree where both exist. Only gradient
+  descent survives what comes next.
 
 Next: contexts longer than one character, one-hots replaced by embeddings, a
-hidden layer in between — and backprop derived through the whole chain.
+hidden layer in between, and backprop derived through the whole chain.

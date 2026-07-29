@@ -1,0 +1,218 @@
+---
+title: "1. A Language Model You Can Count On"
+description: The bigram model — probabilities, sampling, cross-entropy, and perplexity, no neural networks allowed
+---
+
+> Companion notebook: [chapter-1.ipynb](https://github.com/hard-engineering/learn-llm-the-hard-way/blob/main/notebooks/chapter-1.ipynb) ·
+> Theory reference: SLP3 Chapter 3 (N-gram Language Models)
+
+## The task
+
+The dataset is `names.txt`: 32,032 lowercase names, one per line — emma,
+olivia, ava, isabella. The goal: a model that learns what names look like and
+invents new ones. Small enough to stay intuitive; real enough that every
+concept built here — the loss, the sampling loop, the evaluation metric —
+survives unchanged all the way to GPT.
+
+## The one idea underneath everything
+
+A language model assigns probabilities to sequences. It does this by
+factoring: the probability of "emma" is
+
+$$P(\text{emma}) = P(\text{e at start}) \cdot P(\text{m}\mid\text{e}) \cdot P(\text{m}\mid\text{m}) \cdot P(\text{a}\mid\text{m}) \cdot P(\text{end}\mid\text{a})$$
+
+Every LLM ever deployed is this same object: a machine that outputs
+$P(\text{next token} \mid \text{context})$. GPT-4 conditions on thousands of
+previous tokens; the model in this chapter conditions on exactly **one**. That
+is the only difference.
+
+## The bigram model
+
+Work at character level. The token set: 26 letters plus one special boundary
+token `.` marking both start and end of a name — so "emma" yields the pairs
+`.e`, `em`, `mm`, `ma`, `a.`, and 27 tokens total.
+
+The whole model is a 27×27 table: rows = current character, columns = next
+character, cell = how often that pair occurs in the corpus. **Training is
+counting.** Normalise each row (divide by the row's sum) and each row becomes
+a probability distribution over the next character.
+
+Sampling is a walk through the table: start at row `.`, sample a next
+character from that row's probabilities, move to that character's row, repeat
+until `.` is drawn again.
+
+Evaluation: take every bigram in the corpus, look up the probability the
+model assigns it, and ask how surprised the model was on average. Formally —
+for $N$ bigram occurrences where the model gave probability $p_i$ to the
+$i$-th one:
+
+$$\text{NLL} = -\frac{1}{N}\sum_{i=1}^{N} \log p_i$$
+
+The average negative log-likelihood: 0 for a perfect model, larger the more
+often the model is surprised by real data. **Perplexity** is $e^{\text{NLL}}$,
+and it has a physical reading: "the model is as uncertain as if choosing
+uniformly among $k$ characters." Knowing nothing = perplexity 27.
+
+## The exercise
+
+Write `bigram.py` (or a notebook):
+
+1. Load names.txt, build the bigram pairs including `.` boundaries.
+2. Build the 27×27 count matrix (map characters to indices 0–26).
+3. Normalise rows into a probability matrix.
+4. Sample 10 names.
+5. Compute average NLL over the corpus, and perplexity.
+
+Self-checks: NLL near **2.45**, perplexity near **11.6**. Above 27 or below
+~8 means a bug. One thing will bite in step 5: some bigrams never occur, so
+their probability is 0 and $\log 0 = -\infty$. Decide what the fix should be
+before reading on.
+
+**Stop here and write it.** The rest of this chapter discusses what actually
+happened when N did.
+
+## What actually happened
+
+### The evaluation bug worth its weight in theory
+
+N's first NLL computation, with `logP` the element-wise log of the
+probability table and `N` the count matrix:
+
+```python
+NLL = -1 * logP.sum() / N.sum()     # gives 0.0155  — absurd
+```
+
+An NLL of 0.0155 means perplexity $e^{0.0155} \approx 1.02$: a model that
+predicts nearly every character perfectly. The self-check caught it. The bug:
+`logP.sum()` adds each of the 729 table cells **once**, treating the
+never-seen `qz` and the thousands-of-times `an` as equally important, while
+the denominator counts all ~228,000 occurrences. A table-space numerator over
+an occurrence-space denominator.
+
+When the fix was named — each cell's log-probability must be weighted by how
+often that bigram occurs — it produced the best challenge of the lesson:
+
+> **N:** The formulae you gave earlier — none of them said this. Check before
+> you contradict me.
+>
+> **Tutor:** The formulas and the weighting statement are the same thing; the
+> index of the sum is where it hides. The sum runs over $i = 1 \ldots N$ — the
+> **occurrences in the corpus**, roughly 228,000 terms, duplicates included.
+> Regroup it: `an` appears 5,438 times, each contributing the identical number
+> $\log P[a,n]$. Collect identical terms and the occurrence-space sum becomes
+> a cell-space sum — with the counts appearing as weights:
+>
+> $$\sum_{i=1}^{N} \log p_i = \sum_{\text{cells } (a,b)} \text{count}(a,b) \cdot \log P[a,b]$$
+>
+> The weighting was never an extra rule. It is what the original formula turns
+> into when you change the summation index from occurrences to cells.
+
+This **occurrence-space vs cell-space** distinction recurs throughout the
+project — it reappears in gradient computations in chapter 2. The two correct
+implementations, which agree to ten decimal places:
+
+```python
+# occurrence space: one term per bigram in the data
+total, n = 0.0, 0
+for w in words:
+    padded = "." + w + "."
+    for c1, c2 in zip(padded, padded[1:]):
+        total += logP[stoi[c1], stoi[c2]]
+        n += 1
+nll = -total / n
+
+# cell space: counts as weights, one matrix expression
+nll = -(N * logP).sum() / N.sum()
+```
+
+The loop is transparent and slow; the vectorised form runs in C. Holding both
+views at once — *think in loops, compute in tensors* — is arguably the core
+skill this whole project trains.
+
+### Smoothing, and what log(0) actually breaks
+
+N pre-empted the planted trap and smoothed the counts before ever hitting
+$\log 0$ — and did it more carefully than instructed, renormalising the
+denominator so rows still sum to exactly 1 (Laplace smoothing, done
+properly):
+
+```python
+P = (N + 1) / (row_sums + 27)
+```
+
+But the post-mortem revealed a subtlety. Asked *why* smoothing was needed:
+
+> **N:** Division by zero was a mathematical problem without smoothening.
+>
+> **Tutor:** Close — division by zero would need an all-zero row, and every
+> row here has counts. The actual problem is $\log 0$. In the loop form on
+> training data it never triggers — you only look up bigrams that occur. In
+> the vectorised form it does: zero-count cells give $0 \times (-\infty)$,
+> which NumPy evaluates to `nan`, poisoning the sum. And on **new** data it is
+> fatal: one unseen bigram makes an entire name's NLL infinite. Smoothing
+> encodes a modelling stance — nothing is impossible, merely unlikely.
+
+GPT never faces this exact failure (softmax outputs are strictly positive by
+construction — chapter 2), but the concern reappears there as regularisation.
+
+### Three ways to break a sampler
+
+N's first generation loop contained three instructive bugs:
+
+```python
+ix = np.random.choice(np.arange(1, 27))       # bug 3
+while curr_char != ".":
+    curr_char = itos[np.argmax(P[ix])]        # bugs 1 and 2
+    name += curr_char
+```
+
+1. **`ix` never updates** — the loop reads the same row forever. The sampled
+   output must become the next input; that feedback is what *autoregressive*
+   means. Without it there is no generation, just repetition.
+2. **`argmax` is not sampling** — it picks the single most probable next
+   character deterministically, collapsing all diversity (every generated
+   name would be identical). Greedy decoding vs sampling is a real topic —
+   temperature, chapter 9 — but generation wants the weighted dice roll:
+   `np.random.choice(27, p=P[ix])`.
+3. **The first character came from a uniform draw** — but the model already
+   knows how names start: that is exactly what the `.` row encodes. Start at
+   `ix = 26` and the special case disappears. The boundary token exists
+   precisely so "start of name" needs no separate code path.
+
+The fixed loop, in full:
+
+```python
+total_names = []
+while len(total_names) < 10:
+    name = ""
+    ix = 26                      # the '.' row: distribution over first letters
+    curr_char = ''
+    while curr_char != ".":
+        ix = np.random.choice(27, p=P[ix])
+        curr_char = itos[ix]
+        name += curr_char
+    total_names.append(name)
+```
+
+## Results
+
+```
+NLL        = 2.4546        (uniform model: ln 27 ≈ 3.30)
+perplexity = 11.64         (uniform model: 27)
+```
+
+Sampled names: `zllia`, `zala`, `ah`, `mietien`, `catysynan`, `cka`, `nalo`,
+`ol`. Locally pronounceable, globally structureless — a one-character memory
+working exactly as well as it can. This is the baseline every later model
+must beat.
+
+## What carries forward
+
+- The model is $P(\text{next} \mid \text{context})$; only the context grows.
+- NLL is the loss. In chapter 2 it becomes the function gradient descent
+  minimises; by chapter 8 the same formula is called cross-entropy loss.
+- The autoregressive sampling loop survives verbatim to GPT.
+- Occurrence space vs cell space; think in loops, compute in tensors.
+
+Next: the same 729-number model — but learned by gradient descent instead of
+counting, with every derivative derived on paper first.

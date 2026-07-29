@@ -1,0 +1,64 @@
+---
+title: The Journey
+description: What this book is, who is writing it, and how to read it
+---
+
+## What this is
+
+A working journal of one person learning to build a mini LLM from scratch —
+published as a book so you can follow the same road.
+
+The learner (N) has theoretical background in pre-LLM NLP, neural networks,
+and attention, but had not written code in a while. The tutor is Claude
+(Anthropic's AI). The rules of engagement, fixed on day one:
+
+- **N writes every line of code.** The tutor explains concepts, sets
+  exercises, reviews notebooks, and points at bugs — it does not write the
+  solution.
+- **Derivations are done on paper** before they are coded.
+- **Nothing is skipped because it is inconvenient.** Backprop is derived and
+  implemented by hand in NumPy before PyTorch's autograd is allowed to do it
+  for us.
+
+Each chapter is the cleaned-up version of one lesson: the concept, the
+exercise, and — because this is the part most books throw away — the actual
+mistakes, wrong assumptions, and challenges from the live exchange, kept as
+dialogue excerpts.
+
+## The curriculum
+
+**Phase A — NumPy, backprop by hand.** A bigram language model built by
+counting; the same model reborn as a one-layer neural network trained by
+gradient descent; then an MLP language model with a hidden layer.
+
+**Phase B — PyTorch, the modern stack.** The bridge from manual gradients to
+autograd; tokenization and embeddings; attention from a single head to a full
+transformer block; a complete GPT trained on real text; sampling strategies;
+loading OpenAI's GPT-2 weights into our own architecture as the final
+correctness proof; and a BPE tokenizer.
+
+The plan was vetted against three references, which the chapters cite
+throughout:
+
+- **SLP3** — Jurafsky & Martin, *Speech and Language Processing*, 3rd ed.
+  (theory and formal definitions)
+- **Raschka** — *Build a Large Language Model (From Scratch)* (implementation
+  walk-through)
+- **nanochat** — Karpathy's minimal production-grade training stack (what the
+  same ideas look like built for real use)
+
+## How to read it
+
+Each chapter states the exercise before showing any solution. The intended
+use: stop at the exercise, write the code yourself, and only then read on.
+The companion notebook for each chapter — the learner's actual notebook,
+lightly cleaned — is linked at the top of the chapter.
+
+Dialogue excerpts appear like this:
+
+> **N:** The formulas you gave earlier — none of them said this. Check before
+> you contradict me.
+
+They are quoted (with light editing) from the real sessions, and they are in
+the book because the pushback, not the smooth parts, is where the learning
+happened.

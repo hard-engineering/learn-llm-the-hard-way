@@ -1,0 +1,328 @@
+---
+title: "3. An MLP over three characters"
+description: Embeddings, a hidden layer, and a network trained with autograd
+---
+
+> Companion notebook: [chapter-3.ipynb](https://github.com/hard-engineering/learn-llm-the-hard-way/blob/main/notebooks/chapter-3.ipynb).
+> Theory references: Bengio et al. (2003), *A Neural Probabilistic Language
+> Model*; SLP3 Chapter 6.
+>
+> Plan note: the frozen plan put manual NumPy backprop in this lesson and the
+> PyTorch bridge in the next. The live lesson ran in the reverse order. This
+> chapter is the PyTorch MLP; chapter 4 will derive its gradients by hand and
+> check them against autograd.
+
+## Why the table cannot grow
+
+Chapter 2 ended with a warning: the collapse into a 27x27 table exists only
+because a one-character context has 27 possibilities. Condition on three
+characters and the table needs $27^3 = 19{,}683$ rows. Two problems arrive
+together. Storage grows exponentially with context length. And worse: the
+dataset has about 228k characters, so a table with half a million cells is
+mostly empty. When the model meets a context it never saw, counting has
+nothing to say. It cannot generalise. It can only recall.
+
+## Embeddings: stored characters, computed contexts
+
+The fix comes from Bengio's 2003 paper, and it is the most important idea of
+this chapter: represent each character as a small learned vector, called an
+embedding, instead of a one-hot.
+
+A one-hot vector says "I am character 5, and I have nothing in common with
+any other character". Every character is equally distant from every other. An
+embedding can say more. If training pushes the vectors for `a` and `e` close
+together, then anything the model learns about contexts ending in `a`
+transfers, for free, to contexts ending in `e`. The model has never seen the
+context `zqe`, but if it has seen `zqa`, it can still produce a sensible
+prediction. Sharing replaces memorising.
+
+The embeddings live in a matrix $C$ of shape $(27, d)$: one row per
+character, $d$ numbers each. Row $i$ *is* the embedding of character $i$. It
+starts random and is a parameter like any other; gradients flow into it, and
+whatever structure the rows end up with is whatever arrangement reduces the
+loss. This is not a new mechanism. Chapter 2 showed that one-hot times matrix
+equals row selection, so an embedding lookup is the same operation with the
+wasteful multiplication dropped: direct indexing, `C[i]`.
+
+The characters get stored vectors. The contexts do not. A stored table of
+context vectors would need $27^3$ rows and we would be back at chapter 1's
+disease. Instead, the representation of a context is *computed*, on demand,
+by a shared function of its three character embeddings. The function's
+parameters, a few hundred numbers, serve all 19,683 possible contexts,
+including every context the training set never contained. This is
+compositionality, and it is where generalisation physically lives: when
+training improves the row for `e`, every context containing `e` improves at
+once.
+
+## The architecture
+
+$$\text{logits} = \tanh\big([\,C_{x_1}, C_{x_2}, C_{x_3}\,]\,W_1 + b_1\big)\,W_2 + b_2$$
+
+Three character embeddings are concatenated into one vector of $3d$ numbers,
+pushed through a hidden layer of $h$ units with a $\tanh$, and mapped to 27
+logits. Softmax and the mean NLL are chapter 2's, unchanged. The parameters:
+$C$, $W_1$, $b_1$, $W_2$, $b_2$. With $d=2$ and $h=100$: 3,481 numbers.
+
+Why the $\tanh$ is not optional: compose two linear maps and you get another
+linear map, $(xA)B = x(AB)$, one matrix in disguise. Without the
+nonlinearity the network collapses into chapter 2's linear model with extra
+steps. A linear map is a weighted sum, and a weighted sum has no *and* in
+it: it cannot express "raise the score of `u` when position 1 looks like `q`
+and position 2 looks like a vowel". The nonlinearity between the layers is
+what makes depth mean something.
+
+## The indexing rule
+
+One tensor primitive carries the whole embedding stage. A tensor may be
+indexed with another tensor of any shape, and the rule is: the output has
+the same shape as the index tensor, except every integer is replaced by the
+row of $C$ it names, which appends one dimension of size $d$. So `C[X]`
+with `X` of shape $(N, 3)$ returns shape $(N, 3, d)$, and element by
+element:
+
+$$\text{emb}[k, j] = C[\,X[k, j]\,]$$
+
+Nothing per element is more complex than a single lookup; only the loop is
+hidden. The reliable way to decode any tensor line: ask what loop it
+replaced, and write the assignment for one element.
+
+The hidden layer wants each example as one flat vector, so $(N, 3, d)$
+becomes $(N, 3d)$ with `emb.view(-1, 3*d)`. A tensor is one flat block of
+memory plus reading instructions; `view` changes only the instructions and
+copies nothing.
+
+## An honest starting point
+
+`F.cross_entropy(logits, Y)` fuses softmax and mean NLL into one primitive.
+Three reasons it exists when six lines would do: it subtracts the row maximum
+before exponentiating, so large logits cannot overflow (chapter 2's trick,
+built in); it never materialises the intermediate $(N, 27)$ tensors; and its
+backward pass is the analytically simplified $p - \text{onehot}(y)$ rather
+than a chain through six recorded steps. It wants raw logits. Feeding it
+probabilities is a classic silent bug.
+
+Before training, what loss *should* a model score? A model that knows
+nothing spreads probability uniformly: every correct character gets $1/27$,
+so the loss is $-\log\tfrac{1}{27} = \log 27 \approx 3.296$. That number is
+the ignorance baseline, and every loss printed from here to GPT should be
+read against it. The first run of this chapter's network printed 15.66
+instead, and the diagnosis of that number is half the chapter's education;
+it is told in the lesson section below.
+
+## Autograd
+
+Chapter 2 derived one gradient on paper. This network needs the chain rule
+through four stages, and PyTorch's autograd does the mechanics. What it
+actually does: every torch operation, as it runs, attaches to its output a
+record of what produced it and from which inputs, plus whatever values its
+derivative rule needs later ($\tanh$ saves its own output, because its
+derivative is $1 - a^2$). The forward pass therefore leaves behind a graph
+from the parameters to the loss. `loss.backward()` walks it in reverse,
+applying each node's hand-written local derivative rule and multiplying,
+which is the chain rule. Every parameter tensor created with
+`requires_grad=True` receives $\partial L/\partial p$ in its `.grad`
+attribute, same shape as $p$.
+
+The gradient at the embedding table deserves one pause. Row `e` of `C.grad`
+sums contributions from every occurrence of `e` in the batch, each arriving
+backward through $W_1$. Characters used in similar contexts receive similar
+nudges, step after step. The clustering visible at the end of the chapter is
+this gradient, iterated.
+
+Two rules of engagement with autograd. First, `.backward()` *accumulates*
+into `.grad` rather than overwriting, so every iteration must start with
+`p.grad = None` for each parameter; forgetting it means descending along a
+stale mixture of old gradients, a bug that does not crash. Second, the
+parameter update is itself tensor arithmetic that autograd would happily
+record, so it runs inside `with t.no_grad():`.
+
+## Stochastic gradient descent
+
+A full forward pass over 228k examples per step is wasted accuracy: near the
+start, almost any downhill direction works. Instead each iteration samples a
+random minibatch (32 here) and computes the loss and gradient on it alone.
+The estimate is noisy but correct on average, and thousands of cheap noisy
+steps beat a few exact ones. This trade is the "stochastic" in SGD and it is
+how every large model is trained.
+
+Two consequences follow. The printed per-step loss bounces; it is a
+32-example sample, never a measurement. Honest numbers come from a full
+forward pass inside `no_grad`. And near the end of training the parameters
+orbit a minimum in large noisy steps, so the learning rate is decayed for
+the tail (0.1, then 0.01 for the final fifth).
+
+## Train, dev, test
+
+This model has capacity, and capacity spends itself on whichever reduces
+training loss fastest, including memorising quirks of the training set. The
+score that matters is on data the model never saw. Protocol, permanent from
+here on: split into train (80%), dev (10%), test (10%). Gradients touch only
+train. Hyperparameters are compared on dev. Test is evaluated once, at the
+end, because every choice made by looking at dev leaks a little information
+into the model, and only a never-consulted set stays honest.
+
+One subtlety: split at the level of *words*, not examples. The five examples
+from `emma` share most of their characters; scattering them across train and
+dev contaminates dev with near-duplicates. Shuffle words, cut the list, then
+unroll.
+
+## The exercise
+
+1. Build the dataset with a rolling window: `X` of shape $(N, 3)$ holding
+   character indices, `Y` of shape $(N)$ holding targets. From `emma`:
+   `... → e`, `..e → m`, `.em → m`, `emm → a`, `mma → .`. Start the window
+   as `[stoi["."]] * block_size` and slide with `context[1:] + [ix]`.
+2. Split: shuffle `words`, cut at 80% and 90%, build `Xtr/Xdev/Xte`.
+3. Parameters, all `requires_grad=True`: `C` $(27, 2)$, `W1` $(6, 100)$,
+   `b1` $(100)$, `W2` $(100, 27)$ scaled by 0.01, `b2` zeros. Collect them
+   in a list; print the total count.
+4. Training loop, 10k steps: sample `ix = t.randint(0, Xtr.shape[0], (32,))`;
+   forward `C[Xb]` → `view` → `tanh(@ W1 + b1)` → `@ W2 + b2` →
+   `F.cross_entropy`; clear grads; `backward()`; update in `no_grad`.
+5. Evaluate train and dev with full forward passes. Compare against 3.296
+   and against chapter 2's 2.45.
+6. Scale up: embedding to $d=10$, 50k steps, learning rate decay at 80%.
+   Derive every shape from the knobs; no hardcoded 6.
+7. Plot the $d=2$ run's embeddings as labelled points. Sample 20 names: all-dot
+   context, forward one step, `F.softmax`, `t.multinomial`, slide, stop at
+   the dot.
+
+Success: dev loss clearly below the bigram's 2.45. Stop here and write the
+code.
+
+## What happened in the lesson
+
+### "How does C know what 3 means?"
+
+The embedding lookup produced the deepest question of the lesson:
+
+> **N:** C had a shape of (27, d), which means it never knew what integer
+> "1" means or "2" means, because that was not explicitly stored in the
+> matrix. But when we do C[X], how does it know that it has to fetch the d
+> scalars at the index given by the different scalars of X?
+>
+> **Tutor:** It does not, and no knowledge is needed, because indexing is
+> positional by definition. A tensor of shape $(27, d)$ is one flat block of
+> memory; row $i$ begins at offset $i \times d$. When the operation meets
+> the integer 3, it reads $d$ numbers starting at $3 \times d$. The integer
+> does not *mean* anything to the machine; it *is* the position. Asking how
+> C knows what 3 means is like asking how a street knows which house is
+> number 3. The street knows nothing; the numbering convention is the
+> knowledge, held by whoever assigned the numbers.
+
+The meaning lives entirely in `stoi` and `itos`, which the model never
+sees: attached at the entrance, stripped through the middle, re-attached at
+the exit. The test of this understanding was a thought experiment: shuffle
+the alphabet arbitrarily in `stoi`, rebuild `X` and `Y`, and training
+proceeds identically. Only consistency matters, which is also why the
+boundary token can sit at index 26 here and at index 0 in Karpathy's
+makemore with no consequence.
+
+### The loss that started at 15.66
+
+The first forward pass, with all parameters from plain `randn`, scored
+15.66 against an ignorance baseline of 3.296.
+
+> **N:** Loss is 15.6575. Well above 3.296. I don't know, explain.
+>
+> **Tutor:** If the average of $-\log p(\text{correct})$ is 15.66, the
+> typical probability given to the correct character is $e^{-15.66}$, about
+> two in ten million, versus $1/27$ for a uniform guess. The model is not
+> ignorant; it is confidently wrong. Each logit is a sum of 100 terms of
+> roughly unit size and random sign, and such sums grow like the square
+> root of their count, so the logits are spread over roughly $\pm 25$.
+> Exponentiate that and softmax becomes a spike on one arbitrary character.
+
+The cure, verified live: recreate `W2` scaled by 0.01 and `b2` as zeros, so
+the initial logits are near zero and softmax near uniform. The loss came
+out 3.2938 against a predicted 3.2958. Chapter 2 met the same effect (a
+random $W$ starting at 3.61, not 3.30); this chapter's deeper version, with
+the $\sqrt{\text{fan-in}}$ growth law, is the reason a whole later lesson
+belongs to initialisation. The same disease had already appeared in the
+hidden layer in a different costume: the first printed activations were
+$-0.91, 0.99, -0.74, -0.98$, pressed against $\tanh$'s limits, where the
+derivative $1 - a^2$ is nearly zero and learning stalls. Oversized inputs
+to a squashing function show up once as a confidence problem and once as a
+gradient problem.
+
+### A false alarm of overfitting
+
+The first split run reported train 1.9525, dev 2.3454, and drew the obvious
+conclusion: overfitting. The number was wrong, not the model. 1.9525 was
+the loss printed at step 9000, which is the loss of one 32-example
+minibatch; the printed sequence around it read 2.046, 2.361, 2.349, 2.396,
+2.563, 1.9525. Those are not a climb and a plunge; they are sampling noise
+on 32 examples, and the last visible batch happened to be lucky. Measured
+honestly with a full forward pass, train was 2.3361 against dev 2.3454: a
+gap of 0.009, no meaningful overfitting, a model limited by capacity
+instead. The principle: minibatch losses steer training; they are never
+reported.
+
+### "What is p.grad = None for?"
+
+> **Tutor:** `.backward()` does not write gradients, it adds them. Without
+> clearing, iteration 2's `.grad` holds $g_1 + g_2$, and by iteration 100
+> the update direction is the sum of 100 gradients from 100 different
+> parameter states. Training does not crash; it quietly goes wrong.
+> Accumulation is the default because it is sometimes wanted: split a batch
+> too large for memory into four quarters, call backward four times without
+> clearing, and `.grad` holds exactly the full-batch gradient, because
+> gradients of sums are sums of gradients.
+
+### What the embedding space learned
+
+After training the $d=2$ model, the 27 characters were plotted as points.
+Nobody told the model phonology exists; 3,481 parameters rediscovered a
+usable piece of it because it lowers cross-entropy. N's reading of his own
+plot: `a` and `e` separable along one axis, `e`, `o`, `u` spread along the
+other, so the two scarce dimensions encode vowelness and a distinction
+within vowels simultaneously. The consonant clusters were linguistically
+real too: `l`, `r`, `n`, the consonants that swap freely in name slots
+(kayla, kayra, kayna), and a looser `b`, `f`, `g` group. The verdict on the
+sampled names: slightly better than the bigram's, matching a loss gap of
+about 0.1 nats, visible but not dramatic.
+
+## Results
+
+The numbers, in the order they were earned:
+
+| measurement | loss |
+| --- | --- |
+| random init, unscaled | 15.66 |
+| random init, `W2` scaled 0.01 | 3.2938 (baseline: $\log 27$ = 3.2958) |
+| $d=2$, 10k steps, full data | 2.3278 |
+| $d=2$, split: train / dev | 2.3361 / 2.3454 |
+| $d=10$, 50k steps, decay: train / dev | 2.2116 / 2.2439 |
+| test set, evaluated once | 2.2552 |
+| chapter 2 bigram, for reference | 2.4546 |
+
+The test number sits within about a hundredth of dev: the dev set never
+lied. Tuning further (hidden size, more steps) was deliberately deferred
+until a dataset worth the compute; the train-dev gap of 0.03 says the model
+is still mostly capacity-limited, so the headroom is real and banked.
+
+## What carries forward
+
+- The embedding table: stored vectors for the vocabulary, computed
+  representations for everything larger. This split, plus "similar things
+  get similar vectors", survives unchanged into GPT, where $C$ has 50k rows
+  and the computed representation is built by attention instead of
+  concatenation.
+- The indexing rule: output shape = index shape, integers replaced by rows.
+  And its two-array sibling from chapter 2, now in torch:
+  `probs[t.arange(N), Y]`.
+- A nonlinearity between layers, or depth collapses into one matrix.
+- `F.cross_entropy`, and the reading of every loss against $\log V$ and
+  against the previous model.
+- The autograd contract: `requires_grad=True`, forward builds a graph,
+  `p.grad = None`, `loss.backward()`, update inside `no_grad`.
+- Minibatch SGD with learning rate decay; noisy losses steer, full losses
+  report.
+- Train, dev, test, split at the word level. Test is spent, at most, once.
+- A debt, twice incurred: parameters initialised at the wrong scale showed
+  up as saturation and as false confidence. The proper science of
+  initialisation is a later chapter.
+
+Next: the same network's gradients, derived by hand in NumPy through both
+hidden layers, and verified against autograd's numbers. Gradients must not
+be magic before attention is allowed to be.

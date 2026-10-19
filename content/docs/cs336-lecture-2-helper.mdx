@@ -1,0 +1,675 @@
+---
+title: "CS336 lecture 2 helper"
+description: Forward and backward operation counts, gradient descent, AdaGrad, and arithmetic intensity
+---
+
+import Image from 'next/image';
+import lossSensitivity from '../../public/images/cs336-lecture-2-helper/loss-sensitivity.png';
+import batchIntensity from '../../public/images/cs336-lecture-2-helper/batch-arithmetic-intensity.png';
+
+> Companion notebook: [cs336-lecture-2-helper.ipynb](https://github.com/hard-engineering/learn-llm-the-hard-way/blob/main/notebooks/cs336-lecture-2-helper.ipynb).
+>
+> Primary references: [Stanford CS336](https://cs336.stanford.edu/),
+> [Lecture 2 recording](https://www.youtube.com/watch?v=kuYAsz7zspQ), and
+> [the official lecture code](https://github.com/stanford-cs336/lectures/blob/main/lecture_02.py).
+> The relevant functions include `gradients_basics`, `gradients_flops`, `optimizer`, and `AdaGrad`.
+>
+> Supplementary reference: [AI-generated Lecture 2 notes](https://qihongruan.github.io/cs336/lec02.html).
+> These notes omit some lecture material. They are not the course authority.
+>
+> Lesson record: October 17 to 19, 2026. This helper follows CS336 independently
+> of the earlier book chapters. The notebook is a reference companion written
+> from this lesson. It is not presented as code written by the learner.
+
+## The concept
+
+The learner could already derive arithmetic intensity for individual operations.
+The remaining question was how to account for an entire training step.
+
+A training step has three parts. The forward pass computes predictions and a
+loss. The backward pass computes how that loss responds to changes in the
+parameters. The optimizer uses those gradients to update the parameters.
+
+The loss is a single number. Even when a model produces many outputs, we must
+state how those outputs and their targets produce that number. Without that
+definition, a gradient formula can hide a missing sum or averaging factor.
+
+We use a linear layer without a bias or activation function:
+
+$$
+\widehat{Y}=XW,
+\qquad
+X\in\mathbb{R}^{B\times D},
+\quad
+W\in\mathbb{R}^{D\times K}.
+$$
+
+The dimensions are the batch size, the input feature count, and the output
+count. A row of the input holds one example. A column of the weight matrix
+holds the weights for one output. The same weights serve every example.
+
+We choose this loss throughout the matrix derivation:
+
+$$
+L=\frac{1}{2B}\sum_{b=1}^{B}\sum_{k=1}^{K}
+(\hat{y}_{bk}-t_{bk})^2.
+$$
+
+It sums squared errors across outputs and averages across examples. It does
+not average across outputs. With the error matrix and output sensitivities
+defined explicitly, the complete backward mathematics is:
+
+$$
+E=\widehat{Y}-T,
+\qquad
+G_{bk}=\frac{\partial L}{\partial\hat{y}_{bk}}=\frac{E_{bk}}{B},
+$$
+
+$$
+\nabla_W L=X^{\mathsf T}G,
+\qquad
+\nabla_X L=GW^{\mathsf T}.
+$$
+
+The last two formulas also apply to a linear layer followed by other
+differentiable functions. In that case, those functions supply the output
+sensitivities. The errors divided by batch size are specific to our chosen
+loss directly after this layer.
+
+Plain gradient descent updates each weight using its gradient:
+
+$$
+w_i^{\mathrm{new}}=w_i-\eta g_i.
+$$
+
+AdaGrad also remembers a sum of squared gradients for each weight. We use
+the lecture's form, with the small constant inside the square root:
+
+$$
+s_i^{\mathrm{new}}=s_i+g_i^2,
+\qquad
+w_i^{\mathrm{new}}
+=w_i-\frac{\eta g_i}{\sqrt{s_i^{\mathrm{new}}+\varepsilon}}.
+$$
+
+The steps of the lesson are:
+
+1. Count the scalar forward pass.
+2. Extend the count to a batch and multiple outputs.
+3. Derive scalar gradients with the chain rule.
+4. Derive and count weight gradients and input gradients.
+5. Explain gradient descent and count its update operations.
+6. Explain AdaGrad, its operations, and its stored state.
+7. Relate arithmetic to memory traffic.
+
+## The exercise
+
+Use paper first. The notebook contains the reference calculations after
+the exercise cells. Its primitives include `@`, `transpose`, `square`,
+`sum`, `mean`, `sqrt`, `backward`, and `torch.no_grad`. Read their short
+explanations before using them.
+
+1. Take one input and one weight vector, each containing five elements.
+   Count the dot-product multiplications and additions. Then count the
+   operations needed to turn the completed prediction into half the
+   squared error. State the starting point of each count.
+2. Use a batch size of four, three input features, and two outputs. Find
+   the prediction shape, parameter count, and exact and approximate
+   forward matrix-multiplication costs.
+3. Use the input values one, two, and three, with every weight equal to
+   one. Set the target to eight. Find the prediction, error, and gradient.
+4. For that matrix layer, count the weight-gradient and input-gradient
+   dot products separately. Distinguish per-example contributions from
+   final batch gradients.
+5. Return to a target of five. Apply one gradient-descent update with a
+   learning rate of 0.05. Recompute the prediction and loss.
+6. For one AdaGrad weight, start with weight 0.9 and accumulator four.
+   Use a new gradient of one and a learning rate of 0.1. Omit the small
+   constant for this nonzero-denominator calculation. Find the new state,
+   update amount, and weight.
+7. Count the values read and written by one AdaGrad update. Assume FP32
+   and keep temporary results on chip. Then find the ideal matrix-product
+   intensity for a batch size of 128 and both feature dimensions equal
+   to 1024.
+
+**Stop here. Complete the calculations before reading the lesson record or
+running the reference cells.**
+
+## What happened in the lesson
+
+### Step 1: Count a scalar forward pass
+
+The starting model was:
+
+$$
+\mathbf{x}=[1,2,3],
+\qquad
+\mathbf{w}=[1,1,1],
+$$
+
+$$
+\hat{y}=\mathbf{x}\cdot\mathbf{w}=6,
+\qquad
+L=\frac{1}{2}(\hat{y}-5)^2=0.5.
+$$
+
+The prediction needs three multiplications and two additions. Once the
+prediction exists, the loss needs one subtraction, one multiplication to
+square the error, and one multiplication by one half. The complete count
+is eight operations.
+
+With five features, the prediction needs five multiplications and four
+additions. The unchanged loss calculation adds three operations:
+
+$$
+5+4+3=12.
+$$
+
+The word “extra” caused an avoidable disagreement. The tutor meant
+operations after the prediction. The learner compared the new model with
+the earlier three-feature model:
+
+> **N:** I assumed total extra operations needed all the way to compute
+> loss, so gave 4 as answer: 4 extra FLOPs, 2 from multiplication and 2
+> from addition.
+
+That comparison was correct. Moving from three features to five adds two
+multiplications and two additions. It adds no work to the unchanged loss
+formula. A count must name its baseline before an answer can be assessed.
+
+Inline mathematics also displayed as raw text in the chat. The lesson
+switched to display blocks. This helper uses that format throughout.
+
+### Step 2: Count a matrix forward pass
+
+Each output entry is a dot product:
+
+$$
+\hat{y}_{bk}=\sum_{i=1}^{D}x_{bi}w_{ik}.
+$$
+
+One dot product requires:
+
+$$
+D\text{ multiplications}+(D-1)\text{ additions}.
+$$
+
+There is one dot product for every example and output pair:
+
+$$
+F_{\mathrm{forward}}=BK(2D-1)\approx2BDK.
+$$
+
+The parameter count is:
+
+$$
+P=DK.
+$$
+
+Thus the leading forward cost can also be written:
+
+$$
+F_{\mathrm{forward}}\approx2BP.
+$$
+
+For the small exercise, the learner found the output shape, six weights,
+forty exact operations, and forty-eight approximate operations correctly.
+The approximation is visibly different for short dot products.
+
+### Step 3: Derive a scalar gradient
+
+Write the forward calculation as separate functions:
+
+$$
+\hat{y}=\sum_i x_iw_i,
+\qquad
+e=\hat{y}-t,
+\qquad
+L=\frac{1}{2}e^2.
+$$
+
+The goal is the loss sensitivity to one weight. The chain rule gives:
+
+$$
+\frac{\partial L}{\partial w_i}
+=\frac{\partial L}{\partial e}
+\frac{\partial e}{\partial\hat{y}}
+\frac{\partial\hat{y}}{\partial w_i}
+=e\times1\times x_i.
+$$
+
+The factor of one half cancels the factor of two from differentiating the
+square. A partial derivative varies the selected input while holding the
+other independent inputs fixed.
+
+For a target of eight, the prediction stays at six. The error becomes
+negative two and the gradient becomes:
+
+$$
+\nabla_{\mathbf w}L=[-2,-4,-6].
+$$
+
+A small increase in the third weight decreases the loss at this point.
+The backward pass computes that sensitivity. It does not update the weight.
+
+### Step 4: Define the loss before deriving batch gradients
+
+The learner asked which input a derivative uses when there are many
+examples:
+
+> **N:** There are 1000s of x in a batch of forward pass. What x do we use
+> when we compute this derivative?
+
+Each prediction uses its own example's input. The weights are shared, so
+each example contributes a gradient for those same weights. How the
+contributions combine depends on the full loss.
+
+For two predictions from one example, our per-example loss is:
+
+$$
+\ell_b=\frac{1}{2}
+\left[(\hat{y}_{b1}-t_{b1})^2+(\hat{y}_{b2}-t_{b2})^2\right].
+$$
+
+For the batch, we choose:
+
+$$
+L=\frac{1}{B}\sum_{b=1}^{B}\ell_b.
+$$
+
+The output vector does not supply this rule automatically. We chose it.
+For example, predictions six and three against targets five and one give
+errors one and two. The summed half-squared error is 2.5.
+
+The tutor initially introduced the output-gradient matrix before making
+this loss reduction concrete. That hid the averaging factor:
+
+> **N:** But isn't this summing up loss across examples without “a factor
+> determined by the batch loss”?
+
+The distinction is between the derivative of one example's loss and the
+derivative of the full batch loss:
+
+$$
+\frac{\partial L}{\partial\hat{y}_{bk}}
+=\frac{1}{B}\frac{\partial\ell_b}{\partial\hat{y}_{bk}}
+=\frac{E_{bk}}{B}.
+$$
+
+The factor is part of the full-loss derivative. It is not added a second
+time when propagating that derivative through a layer. For a different
+differentiable batch reduction, the chain rule still adds contributions
+through the different paths, but their coefficients come from that reduction.
+
+The learner also corrected the order of explanation:
+
+> **N:** We have to find gradient of loss wrt each weight. We should start
+> from there and explain partial derivatives as we go.
+
+Starting from one weight makes the derivation concrete. A weight connecting
+input feature one to output two affects output two for every example:
+
+$$
+\frac{\partial L}{\partial w_{12}}
+=\frac{1}{B}\sum_{b=1}^{B}E_{b2}x_{b1}.
+$$
+
+More generally:
+
+$$
+\frac{\partial L}{\partial w_{ik}}
+=\frac{1}{B}\sum_{b=1}^{B}x_{bi}E_{bk}.
+$$
+
+This is a dot product across the batch. Arranging all such dot products
+gives:
+
+$$
+\nabla_W L=\frac{1}{B}X^{\mathsf T}E=X^{\mathsf T}G.
+$$
+
+There are two useful ways to count the same work. There are final gradients
+for all weights, and per-example contributions for all example-weight pairs:
+
+$$
+DK\text{ final gradients},
+\qquad
+BDK\text{ per-example contributions}.
+$$
+
+Assuming the errors already exist, the contributions need one multiplication
+each. Adding them requires one fewer addition than the batch size for each
+weight:
+
+$$
+F_{\mathrm{weight\ product}}
+=BDK+DK(B-1)
+=DK(2B-1)
+\approx2BDK.
+$$
+
+If averaging is applied after this product, it adds one division per
+weight. An implementation can instead scale the output gradients once.
+
+### Why an intermediate value needs a gradient
+
+Input gradients became clear when the learner returned to functions:
+
+> **N:** Ignore matrix operations for a moment. Teach why partial
+> derivative with x is needed. Instead of expressing in matrices, perhaps
+> express as functions.
+
+The computation was written as:
+
+$$
+x=f(a,b),\qquad
+\hat{y}=g(x,w),\qquad
+L=e(y,\hat{y}).
+$$
+
+The target is fixed. The earlier function has a trainable parameter. To
+find that parameter's gradient, follow its effect through the intermediate
+value and prediction:
+
+$$
+\frac{\partial L}{\partial b}
+=\frac{\partial L}{\partial\hat{y}}
+\frac{\partial\hat{y}}{\partial x}
+\frac{\partial x}{\partial b}.
+$$
+
+The first two factors are the loss sensitivity to the intermediate value:
+
+$$
+\underbrace{\frac{\partial L}{\partial x}}_{\text{needed by the earlier function}}
+=\frac{\partial L}{\partial\hat{y}}
+\frac{\partial\hat{y}}{\partial x}.
+$$
+
+We compute it to reach the earlier parameter. We do not need to update the
+intermediate value directly. The next forward pass recomputes it from the
+updated parameters.
+
+With the following concrete functions and values:
+
+$$
+x=ab,\quad \hat{y}=xw,\quad L=\frac{1}{2}(\hat{y}-y)^2,
+$$
+
+$$
+a=2,\quad b=3,\quad w=4,\quad y=20,
+$$
+
+the forward values are six, twenty-four, and eight. The backward chain is:
+
+$$
+\frac{\partial L}{\partial\hat{y}}=4,
+\qquad
+\frac{\partial\hat{y}}{\partial x}=4,
+\qquad
+\frac{\partial x}{\partial b}=2,
+$$
+
+$$
+\frac{\partial L}{\partial x}=16,
+\qquad
+\frac{\partial L}{\partial b}=32.
+$$
+
+<Image
+  src={lossSensitivity}
+  alt="Loss as a function of the earlier weight. The current weight is three and the loss is eight. A tangent at that point has slope thirty-two, showing the sensitivity reached through the intermediate value."
+  sizes="(max-width: 768px) 100vw, 720px"
+/>
+
+Return to a matrix layer. One intermediate input can affect every output
+for its example. The chain rule combines those paths:
+
+$$
+\frac{\partial L}{\partial x_{bi}}
+=\sum_{k=1}^{K}
+\frac{\partial L}{\partial\hat{y}_{bk}}
+\frac{\partial\hat{y}_{bk}}{\partial x_{bi}}
+=\sum_{k=1}^{K}G_{bk}w_{ik}.
+$$
+
+Therefore:
+
+$$
+\nabla_X L=GW^{\mathsf T}.
+$$
+
+Each input gradient is a dot product across outputs. There is one such
+gradient for every example and input feature:
+
+$$
+F_{\mathrm{input\ product}}=BD(2K-1)\approx2BDK.
+$$
+
+The main backward work is two matrix products. For an interior layer that
+needs both gradients, the leading counts are:
+
+$$
+F_{\mathrm{forward}}\approx2BDK,
+\qquad
+F_{\mathrm{backward}}\approx4BDK,
+$$
+
+$$
+F_{\mathrm{forward+backward}}\approx6BDK=6BP.
+$$
+
+This is not an exact universal training cost. It excludes the loss,
+activations, scaling, optimizer, and other operations. A first layer with
+fixed raw inputs can skip the input-gradient product. For a network of
+large linear layers, summing the layer costs gives the familiar leading
+parameter-based estimate. Attention and other work need separate accounting;
+long-context Transformers need more than this simple estimate.
+
+### Step 5: Use gradients to change weights
+
+A positive derivative means a small weight increase raises the loss. A
+negative derivative means a small increase lowers it. Gradient descent
+uses the opposite direction:
+
+$$
+w_i^{\mathrm{new}}=w_i-\eta g_i.
+$$
+
+The learning rate controls the step size. The direction is locally useful;
+a step that is too large can still raise the loss. All weights in one
+update use gradients computed at the same old parameter values.
+
+For the original target of five, the gradient was:
+
+$$
+[1,2,3].
+$$
+
+With a learning rate of 0.05, the learner correctly found:
+
+$$
+\mathbf{w}^{\mathrm{new}}=[0.95,0.9,0.85],
+\qquad
+\hat{y}^{\mathrm{new}}=5.3,
+\qquad
+L^{\mathrm{new}}=0.045.
+$$
+
+Plain SGD without momentum or weight decay needs one multiplication and
+one subtraction per parameter:
+
+$$
+F_{\mathrm{SGD\ update}}=2P.
+$$
+
+The gradient calculation belongs to backward. The optimizer uses the
+completed gradients. In a repeated PyTorch loop, clear old parameter
+gradients before the next backward pass unless accumulation is intended.
+
+### Step 6: Remember squared gradients with AdaGrad
+
+Plain SGD does not retain a gradient history. AdaGrad stores one sum of
+squared gradients per parameter. Squaring prevents opposite gradient signs
+from cancelling in that history.
+
+As the accumulator grows, the effective learning rate decreases:
+
+$$
+\eta_i^{\mathrm{effective}}
+=\frac{\eta}{\sqrt{s_i^{\mathrm{new}}+\varepsilon}}.
+$$
+
+Starting from weight 0.9 and accumulator four, a gradient of one produces:
+
+$$
+s^{\mathrm{new}}=5,
+\qquad
+u=\frac{0.1}{\sqrt{5}}\approx0.04472,
+\qquad
+w^{\mathrm{new}}\approx0.85528.
+$$
+
+The accumulator persists across updates. It is optimizer state. The
+backward pass still computes a fresh gradient for each update.
+
+Our written AdaGrad form has seven scalar operations per parameter: two
+multiplications, two additions, one square root, one division, and one
+subtraction. This counts a square root as one listed operation. It does
+not claim that all operations have equal hardware cost or use tensor cores.
+
+The update work and additional FP32 state are:
+
+$$
+7P\text{ scalar operations},
+\qquad
+4P\text{ bytes of optimizer state}.
+$$
+
+There is no batch-size factor in this update count. The batch contributions
+have already been combined into a gradient for each parameter.
+
+### Step 7: Count memory traffic before dividing
+
+For one AdaGrad update, read the weight, gradient, and accumulator. Write
+the new weight and accumulator. Assume all temporary results stay on chip
+and ignore transfers for the two shared scalar constants.
+
+The learner identified the correct reads and writes, then gave the traffic
+as five times the parameter count. That counts values, not bytes:
+
+$$
+3P\text{ reads}+2P\text{ writes}=5P\text{ values}.
+$$
+
+For FP32:
+
+$$
+Q_{\mathrm{AdaGrad}}=20P\text{ bytes}.
+$$
+
+Under our seven-operation convention:
+
+$$
+I_{\mathrm{AdaGrad}}=\frac{7P}{20P}
+=0.35\text{ scalar operations per byte}.
+$$
+
+A larger parameter count does not improve this reuse ratio. For large
+arrays, a fused optimizer update is usually limited by memory traffic.
+Separate operations that write temporary arrays can move more bytes.
+
+For each matrix product, use a separate ideal traffic model: read each
+operand once and write the result once. Use FP32 for every operand and
+result. The three products have the same sum of operand and result sizes:
+
+$$
+Q_{\mathrm{matrix}}=4(BD+DK+BK)\text{ bytes}.
+$$
+
+Hence:
+
+$$
+I_{\mathrm{matrix}}
+\approx\frac{2BDK}{4(BD+DK+BK)}.
+$$
+
+This model excludes extra transfers caused by tiling, cache effects,
+gradient accumulation into existing buffers, and other kernels. It also
+does not assume reuse between separate matrix products. Mixed precision
+requires counting the bytes of each operand separately.
+
+For the final exercise:
+
+$$
+B=128,\qquad D=1024,\qquad K=1024,
+$$
+
+$$
+F_{\mathrm{matrix}}\approx268{,}435{,}456\text{ FLOPs},
+$$
+
+$$
+Q_{\mathrm{matrix}}=5{,}242{,}880\text{ bytes},
+$$
+
+$$
+\boxed{I_{\mathrm{matrix}}=51.2\text{ FLOPs per byte}.}
+$$
+
+<Image
+  src={batchIntensity}
+  alt="Ideal FP32 matrix-product intensity increases with batch size for feature dimensions of 1024. Batch 128 gives 51.2 FLOPs per byte. The AdaGrad seven-operation estimate stays at 0.35 scalar operations per byte."
+  sizes="(max-width: 768px) 100vw, 720px"
+/>
+
+The learner obtained 51.2. This shows substantially more arithmetic per
+transferred byte than the optimizer update. It does not by itself prove
+that the matrix product is compute-bound. That decision needs a hardware
+compute-to-bandwidth ratio for the matching precision and operation type.
+Do not compare optimizer square roots and divisions with a tensor-core
+matrix-multiplication peak as though they were interchangeable.
+
+## Results
+
+These were paper calculations completed in the lesson. They are not GPU
+timing measurements. The companion notebook adds reproducible numerical
+checks of the formulas and marks those as reference checks. All nine code
+cells were executed on CPU. Both manual matrix gradients matched autograd,
+and one weight gradient also matched a finite-difference check. The two plots
+above were generated by the notebook.
+
+| Calculation | Result |
+| --- | --- |
+| Five-feature scalar forward pass, including loss | 12 operations |
+| Small matrix forward product | 40 exact; 48 approximate FLOPs |
+| Small matrix weight-gradient product | 42 exact; 48 approximate FLOPs |
+| Small matrix input-gradient product | 36 exact; 48 approximate FLOPs |
+| Updated scalar-model loss at learning rate 0.05 | 0.045 |
+| AdaGrad second accumulator | 5 |
+| AdaGrad updated weight | approximately 0.85528 |
+| Ideal FP32 matrix-product intensity in the final exercise | 51.2 FLOPs per byte |
+
+The small matrix examples use a batch size of four, three input features,
+and two outputs. Their exact dot-product counts exclude averaging and the
+loss. The approximations deliberately count a multiply-add as two FLOPs.
+
+## What carries forward
+
+- Start a derivative explanation from the parameter or intermediate value
+  whose gradient is needed. Define each local derivative along its path.
+- Define the scalar loss before differentiating vector or batch outputs.
+  State which axes are summed and which are averaged.
+- Shared weights receive contributions from many examples. A final batch
+  gradient is not a separate parameter for each example.
+- Intermediate gradients connect the loss to earlier parameters. They are
+  required for learning earlier layers, even though the optimizer does not
+  directly update the intermediate values.
+- A linear layer usually needs two backward matrix products. The leading
+  forward-plus-backward estimate excludes the optimizer and other kernels.
+- Optimizer state persists across steps. Parameter gradients and optimizer
+  state have different roles and lifetimes.
+- Count bytes as well as values. State the precision, read/write model,
+  and operation-count convention before calculating arithmetic intensity.
+- Numerical equality of formulas is not evidence of measured GPU speed.
+  Actual timing, memory traffic, and utilization require separate work.
